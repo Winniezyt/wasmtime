@@ -115,6 +115,7 @@ pub enum Compound {
     Struct(Vec<Field>),
     Enum(Enum),
     // TODO(mbm): intern name identifier
+    ExtEnum{base: Enum, extra: Vec<Field>}, 
     Named(Ident),
 }
 
@@ -262,6 +263,19 @@ impl Compound {
                     })
                     .collect(),
             ),
+            ModelType::ExtEnumValue(fields) => {
+                // You cannot fully lower here without a base enum, so just wrap the fields.
+                let extra: Vec<Field> = fields.iter().map(|mf| Field {
+                    name: mf.name.clone(),
+                    ty: Self::from_ast(&mf.ty),
+                }).collect();
+
+                // Placeholder: base will be supplied later during collect_models.
+                Self::ExtEnum {
+                    base: Enum { variants: Vec::new() }, // dummy
+                    extra,
+                }
+            }
             ModelType::Named(name) => Self::Named(name.clone()),
         }
     }
@@ -341,6 +355,14 @@ impl std::fmt::Display for Compound {
             ),
             Compound::Enum(e) => {
                 write!(f, "enum({name})", name = e.name.0,)
+            }
+            Compound::ExtEnum { base, extra } => {
+                let extras = extra
+                    .iter()
+                    .map(|f| format!("{}: {}", f.name.0, f.ty))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "ext-enum({} + {{{}}})", base.name.0, extras)
             }
             Compound::Named(name) => write!(f, "{}", name.0),
         }

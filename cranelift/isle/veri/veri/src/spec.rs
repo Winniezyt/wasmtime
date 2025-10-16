@@ -9,7 +9,8 @@ use std::{
     fmt::Debug,
 };
 
-use crate::types::{Compound, Const};
+use crate::types::{Compound, Const, Field, Enum};
+use crate::type; 
 
 // QUESTION(mbm): do we need this layer independent of AST spec types and Veri-IR?
 
@@ -658,6 +659,23 @@ impl SpecEnv {
         Ok(env)
     }
 
+    // helper function get_enum 
+    pub fn get_enum_from_name<'a>(
+            &'a self,
+            tyenv: &'a TypeEnv,
+            name: &Ident,
+        ) -> Option<&'a Enum> {
+            // Intern the ident → TypeId (not Sym!)
+            let ty_id = tyenv.intern(name).expect("type not found in TypeEnv");
+
+            // Now look in self.type_model, which stores Compounds
+            match self.type_model.get(&ty_id) {
+                Some(Compound::Enum(e)) => Some(e),
+                Some(Compound::ExtEnum { base, .. }) => Some(base),
+                _ => None,
+            }
+    }
+
     fn collect_models(&mut self, defs: &[Def], tyenv: &TypeEnv) {
         for def in defs {
             if let ast::Def::Model(Model { name, val }) = def {
@@ -671,6 +689,31 @@ impl SpecEnv {
                         // TODO(mbm): enforce that the expression is constant.
                         // TODO(mbm): ensure the type of the expression matches the type of the
                         self.const_value.insert(sym, expr_from_ast(val));
+                    }
+                    ast::ModelValue::ExtEnumValue(fields) => {
+                        let extra: Vec<Field> = fields.iter().map(|mf| Field {
+                            name: mf.name.clone(),
+                            ty: Compound::from_ast(&mf.ty),
+                        }).collect();
+
+                        // Step 1: intern to get Sym
+                        let sym = tyenv.intern(name);
+
+                        // Step 2: map Sym -> TypeId
+                        let ty_id = *tyenv.syms.get(sym).expect("no TypeId for sym");
+
+                        // Step 3: resolve base enum
+                        let base_enum = self.get_enum_from_name(tyenv, name).expect("expected enum");
+
+                        // Build compound
+                        let compound = Compound::ExtEnum {
+                            base: base_enum.clone(),
+                            extra,
+                        };
+
+                        // Step 4: insert into type_model using TypeId
+                        self.type_model.insert(ty_id, compound);
+                    
                     }
                 }
             }

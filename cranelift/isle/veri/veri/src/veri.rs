@@ -456,7 +456,7 @@ pub enum Symbolic {
     Scalar(ExprId),
     Struct(Vec<SymbolicField>),
     Enum(SymbolicEnum),
-    ExtEnum(SymbolicEnum, Vec<SymbolicField>), // enum with extra fields
+    ExtEnum(SymbolicEnum, Vec<SymbolicField>), // ext enum with extra fields 
     Option(SymbolicOption),
     Tuple(Vec<Symbolic>),
     Macro(Macro),
@@ -480,7 +480,7 @@ impl Symbolic {
     fn as_enum(&self) -> Option<&SymbolicEnum> {
         match self {
             Self::Enum(e) => Some(e),
-            Self::ExtEnum(e, _) => Some(e),
+            Self::ExtEnum(e, _) => Some(e), // unwrap ExtEnum 
             _ => None,
         }
     }
@@ -644,7 +644,7 @@ impl Symbolic {
                     })
                     .collect(),
             ),
-            v => todo!("scalar map: {v:?}"),
+            _ => todo!(),
         }
     }
 
@@ -734,8 +734,7 @@ impl std::fmt::Display for Symbolic {
                 f,
                 "{{{discriminant}, {variants}, {fields}}}",
                 discriminant = e.discriminant.index(),
-                variants = e
-                    .variants
+                variants = e.variants
                     .iter()
                     .map(|v| v.to_string())
                     .collect::<Vec<_>>()
@@ -2307,7 +2306,7 @@ impl<'a> ConditionsBuilder<'a> {
                     .collect::<Result<_>>()?;
                 Ok(self.new_enum(e.id, discriminant, variants)?)
             }
-            Compound::ExtEnum(e, extra_fields) => {
+            Compound::ExtEnum( base,  extra) => {
                 // Allocate discriminant
                 let discriminant = self.alloc_variable(
                     Type::Int,
@@ -2315,14 +2314,14 @@ impl<'a> ConditionsBuilder<'a> {
                 );
 
                 // Allocate the variants like a normal enum
-                let variants = e
+                let variants = base
                     .variants
                     .iter()
                     .map(|v| self.alloc_variant(v, name.clone()))
                     .collect::<Result<_>>()?;
 
                 // Allocate the extra fields
-                let extra_fields = extra_fields
+                let extra = extra
                     .iter()
                     .map(|f| {
                         Ok(SymbolicField {
@@ -2334,11 +2333,11 @@ impl<'a> ConditionsBuilder<'a> {
 
                 Ok(Symbolic::ExtEnum(
                     SymbolicEnum {
-                        ty: e.id,
+                        ty: base.id,
                         discriminant,
                         variants,
                     },
-                    extra_fields,
+                    extra,
                 ))
             }
 

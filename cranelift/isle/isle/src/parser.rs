@@ -793,11 +793,29 @@ impl<'a> Parser<'a> {
         let val = if self.eat_sym_str("type")? {
             let ty = self.parse_model_type()?;
             ModelValue::TypeValue(ty)
+        } else if self.eat_sym_str("type-ext-enum")? {
+            // Expect (struct ...)
+            self.expect_lparen()?;
+            if !self.eat_sym_str("struct")? {
+                return Err(self.error(pos, "expected (struct ...) after type-ext-enum".to_string()));
+            }
+            let mut fields = Vec::new();
+            while !self.is_rparen() {
+                self.expect_lparen()?;
+                let fname = self.parse_ident()?;
+                let fty = self.parse_model_type()?;
+                self.expect_rparen()?;
+                fields.push(ModelField { name: fname, ty: fty });
+            }
+            self.expect_rparen()?; // end (struct …)
+
+            ModelValue::ExtEnumValue(fields)
+
         } else if self.eat_sym_str("const")? {
             let val = self.parse_spec_expr()?;
             ModelValue::ConstValue(val)
         } else {
-            return Err(self.error(pos, "Model must be a type, enum or const".to_string()));
+            return Err(self.error(pos, "Model must be a type, type-ext-enum, or const".to_string()));
         };
 
         self.expect_rparen()?; // end body
@@ -845,7 +863,26 @@ impl<'a> Parser<'a> {
                 let name = self.parse_ident()?;
                 self.expect_rparen()?;
                 Ok(ModelType::Named(name))
-            } else {
+            } else if self.eat_sym_str("enum")?{
+                let mut variants = Vec::new();
+                while !self.is_rparen() {
+                    self.expect_lparen()?;
+                    let name = self.parse_ident()?;
+                    let mut fields = Vec::new();
+                    while !self.is_rparen() {
+                        self.expect_lparen()?;
+                        let fname = self.parse_ident()?;
+                        let fty   = self.parse_model_type()?;
+                        self.expect_rparen()?;
+                        fields.push(ModelField { name: fname, ty: fty });
+                    }
+                    self.expect_rparen()?;
+                variants.push(ModelVariant { name, fields });
+                }
+                self.expect_rparen()?;
+                Ok(ModelType::Enum(variants))
+            } 
+            else {
                 Err(self.error(
                     pos,
                     "Badly formed model: should be BitVector (bv ...) or Struct (struct ...)"
