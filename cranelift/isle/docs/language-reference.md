@@ -2021,3 +2021,70 @@ Together these construct form a layered architecture:
 4. **Specification Layer** - visa `spec`
 
 This design cleanly separates typing, instantiation, and logical reasoning within ISLE's verification framework. 
+
+## Running the ISLE Verifier 
+
+The ISLE verifier can be run on individual rules or rule chains using the `veri` tool included in the Cranelift repository. 
+
+### Location of the Verifier 
+
+Navigate to the verifier directory 
+
+```bash
+cd cranelift/isle/veri/veri
+```
+
+The main entry point for verification is the helper script: 
+
+```bash
+script/veri.sh
+```
+
+### Verifying an individual rule 
+
+The verifier can check a specific ISLE rule using `--filter` option. 
+
+```bash
+./script/veri.sh -a x64 -- --filter include:rule:<rule_name> --solver z3
+```
+
+The verifier will translate the rule and its specification into SMT constraints and check them using the selected SMT solver.
+
+### Verifying Rule Chains 
+
+Rules in ISLE may form chains, where the result of one rule becomes the input to another.
+
+The verifier can analyze these chains automatically. When a rule is selected using the filter mechanism, the verifier will also include any dependent rules required to construct the full rule chain.
+
+This allows verification to ensure that the entire rewrite sequence preserves the specification.
+
+### Expected Output 
+
+A successful verification run produces output similar to:
+
+```c
+type solution status = solved
+// The solver successfully resolved the type constraints
+applicability = applicable
+// The rule's preconditions are satisfiable
+verification = success
+// The SMT solver proved the specification holds
+```
+
+### Debugging Verification 
+
+Additional debugging information can be enabled using environment variables:
+
+```bash
+RUST_BACKTRACE=1 RUST_LOG=DEBUG \
+./script/veri.sh -a x64 -- \
+--filter include:rule:load_narrow \
+--solver z3 \
+--debug
+```
+
+This enables:
+- Rust stack traces
+- detailed logging from the verifier
+- debugging output for SMT generation
+
