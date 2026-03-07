@@ -1616,15 +1616,209 @@ At the top level of a verification-enabled ISLE file, four definition forms are 
 
 1. `(model ...)` — specifies which SMT construct is used to model an ISLE type
 2. `(instantiate ...)` — specifies which concrete type instantiations (e.g. monomorphizations to specific bit-widths) are verified for a term
-3. `(form ...)` — a reusable set of type signatures used within `instantiate`
-4. `(spec ...)` — provides a specification of a term using logical expressions, including `provide` and `require` blocks 
+3. `(spec ...)` — provides a specification of a term using logical expressions, including `provide` and `require` blocks 
+
+Additionally, the verification language introduces a specification expression language `(spec-expr)` used within specifications.
 
 
-### 1. Specification: `(spec ...)` 
+### 1. Model: `(model ...)`
 
-A `spec` defines a logical constract over an ISLE term. 
+#### 1.1 Formal Grammar 
 
-#### 1.1. Formal Grammar 
+```bnf
+<model> ::= <ty> "(" "type" <model-ty> ")"
+          | <ty> "(" "enum" <model-variant>* ")"
+
+<model-ty> ::= "Bool"
+             | "Int"
+             | "Unit"
+             | "(" "bv" [ <int> ] ")"
+
+<model-variant> ::= "(" <ident> [ <spec-expr> ] ")"
+```
+
+#### 1.2 Semantics
+
+A `model` definition assigns an **SMT interpretation** to an ISLE type. 
+
+This definds 
+```code
+ISLE Type  →  SMT Sort
+```
+
+Without a `model` a type has no formal meaning in verification. 
+
+The `model` therefore acts as the bridge between 
+- the ISLE type system 
+- the SMT solver's logical sorts 
+
+Two modelling strategies are supposed: 
+
+1. Primitive Type Mode
+
+```lisp
+(type T (primitive ...))
+(model T (type <model-ty>))
+```
+
+This maps an ISLE type directly to an SMT sort. 
+
+2. Enumeration Model 
+
+```lisp
+(model T (enum (Variant₁ ...) (Variant₂ ...) ...))
+```
+This encodes the ISLE type as a finite SMT datatype. 
+
+#### 1.3 Examples 
+
+```lisp
+(type WritableReg (primitive WritableReg))
+(model WritableReg (type (bv)))
+```
+
+**Explanation:**
+```code
+WritableReg ↦ BitVec[w]
+```
+- `WritableReg` is an ISLE type 
+- The model maps it to an SMT bitvector 
+- Since no width is provided, the bitvector width may be inferred later. 
+
+
+### 2. Instantiation: `(instantiate ...)`
+
+#### 2.1 Formal Grammar 
+
+```bnf
+<instantiation> ::= <ident> <signature>*
+                  | <ident> <ident>
+
+<signature>  ::= "(" <sig-args> <sig-ret> <sig-canon> ")"
+<sig-args>   ::= "(" "args" <model-ty>* ")"
+<sig-ret>    ::= "(" "ret" <model-ty>* ")"
+<sig-canon>  ::= "(" "canon" <model-ty>* ")"
+```
+
+#### 2.2 Semantics
+
+`instantiate` declares concrete verification instances of a term. 
+
+Verification signature may contain abstract types (for example, bitvectors with unspecified width). Instantiation specializes these generic signatures into concrete types that the SMT solver can reason about. 
+
+This process is similar to monoporphization in compilers: 
+```lisp
+generic specification
+        ↓
+instantiate
+        ↓
+concrete verification instance
+```
+
+For example, 
+```lisp
+(bv w)
+```
+may be instantiated as 
+
+```lisp
+(bv 8)
+(bv 16)
+(bv 32)
+(bv 64)
+```
+
+Each instantiation produces a separate SMT verification obligation. 
+
+Two forms of instantiation exists: 
+
+1. Direct Signature Instantiation: concrete signatures written explicitly
+
+
+2. Form-based Instantiation: a previously defined `form` is used
+
+
+#### 2.3 Signature Definitions
+
+##### 2.3.1 Formal Grammar 
+```bnf
+<signature>  ::= "(" <sig-args> <sig-ret> <sig-canon> ")"
+<sig-args>   ::= "(" "args" <model-ty>* ")"
+<sig-ret>    ::= "(" "ret" <model-ty>* ")"
+<sig-canon>  ::= "(" "canon" <model-ty>* ")"
+```
+
+##### 2.3.2 Semantic Meaning 
+
+A signature defines 
+- argument SMT sorts
+- return SMT sorts
+- optional canonical type 
+
+It represents a function type: 
+```code
+(args₁ × args₂ × …) → (ret₁ × ret₂ × …)
+```
+
+#### 2.4 Form: `(form ...)`
+
+##### 2.4.1 Formal Grammar 
+
+```bnf
+<form> ::= <ident> <signature>*
+```
+
+#### 2.4.2 Semantics 
+
+A `form` defines a reusable collection of verification signatures for a term.
+
+It does not define behavior. Instead, it restricts which type combinations are valid during verification.
+
+Forms allow a set of related instantiations to be declared once and reused across multiple terms.
+
+#### 2.5.3 Example (form)
+```lisp
+(form fcvt
+  ((args (named Type) (bv 32)) (ret (bv 32)))
+  ((args (named Type) (bv 32)) (ret (bv 64)))
+  ((args (named Type) (bv 64)) (ret (bv 32)))
+  ((args (named Type) (bv 64)) (ret (bv 64))))
+```
+
+**Explanation:**
+This declares that `fcvt` supports four types of combinations: 
+    - 32 -> 32 
+    - 32 -> 64
+    - 64 -> 32 
+    - 64 -> 64 
+
+The verifier checks that any use of `fcvt` conforms to one of these signatures. 
+
+
+#### 2.6 Example (instantiation)
+
+```lisp
+(spec (iadd ty x y)
+  (provide (= result (bvadd x y))))
+
+(instantiate iadd
+  ((args (named Type) (bv 8) (bv 8)) (ret (bv 8)))
+  ((args (named Type) (bv 16) (bv 16)) (ret (bv 16)))
+  ((args (named Type) (bv 32) (bv 32)) (ret (bv 32)))
+  ((args (named Type) (bv 64) (bv 64)) (ret (bv 64)))
+  ((args (named Type) (bv 128) (bv 128)) (ret (bv 128))))
+```
+
+**Explanation:**
+- The `spec` defines bitvector addition abstractly 
+- `instantiate` create concrete width-specific instances 
+- The verifier generates SMT obligations separately for each width 
+
+### 3. Specification: `(spec ...)` 
+
+A `spec` defines a specifiaction over an ISLE term. 
+
+#### 3.1. Formal Grammar 
 ```bnf
 <spec> ::= "(" "spec" "(" <ident> <ident>* ")" <provide> [ <require> ] ")"
 
@@ -1634,7 +1828,7 @@ A `spec` defines a logical constract over an ISLE term.
 <modifies> ::= "(" "modifies" <ident> [ <ident> ] ")"
 ```
 
-#### 1.2 Semantics 
+#### 3.2 Semantics 
 A `spec` definition declares a **specification** for an ISLE term. 
 
 A specification 
@@ -1670,7 +1864,7 @@ In other words,
 - `(match ...)` supports pattern-related constraints 
 - `(modifies ...)` describes state mutation effects
 
-#### 1.3 Example
+#### 3.3 Example
 
 ```lisp
 (decl value_regs (Reg Reg) ValueRegs)
@@ -1688,11 +1882,11 @@ In other words,
     - high half equal to `arg2`
 - There is no `require` block, so the specification is unconditional. 
 
-#### 1.4 Specific Expression Language (`spec-expr`)
+#### 3.4 Specific Expression Language (`spec-expr`)
 
 `spec-expr` is not a top-level feature, but is the expression languages used within `require`, `provide`, and `match`. 
 
-##### 1.4.1 Formal Grammar 
+##### 3.4.1 Formal Grammar 
 
 ```bnf
 
@@ -1729,7 +1923,7 @@ In other words,
 
 ```
 
-##### 1.4.2 Operators (`spec-op`)
+##### 3.4.2 Operators (`spec-op`)
 Operators include: 
 - Boolean logic: `and`, `or`, `not`, `=>`
 - Equality & comparisons 
@@ -1742,7 +1936,7 @@ Operators include:
 
 These directly maps to SMT operators. 
 
-##### 1.4.3 Semantics 
+##### 3.4.3 Semantics 
 `spec-expr` defines a first-order term language over: 
 - integers
 - bitvectors
@@ -1756,146 +1950,6 @@ For example:
 (= result (bvadd x y))
 ```
 becomes an SMT equality constraint. 
-
-
-### 2. Model: `(model ...)`
-
-#### 2.1 Formal Grammar 
-
-```bnf
-<model> ::= <ty> "(" "type" <model-ty> ")"
-          | <ty> "(" "enum" <model-variant>* ")"
-
-<model-ty> ::= "Bool"
-             | "Int"
-             | "Unit"
-             | "(" "bv" [ <int> ] ")"
-
-<model-variant> ::= "(" <ident> [ <spec-expr> ] ")"
-```
-
-#### 2.2 Semantics
-
-A `model` definition assigns an **SMT interpretation** to an ISLE type. 
-
-This definds 
-```code
-ISLE Type  →  SMT Sort
-```
-
-Without a model a type has no formal meaning in verification. 
-
-This bridges ISLE's type system and the SMT solver. 
-
-#### 2.3 Examples 
-
-```lisp
-(type WritableReg (primitive WritableReg))
-(model WritableReg (type (bv)))
-```
-
-**Explanation:**
-```code
-WritableReg ↦ BitVec[w]
-```
-- `WritableReg` is an ISLE type 
-- The model maps it to an SMT bitvector 
-- Since no width is provided, the bitvector width may be inferred later. 
-
-### 3. Form: `(form ...)`
-
-#### 3.1 Formal Grammar 
-
-```bnf
-<form> ::= <ident> <signature>*
-```
-
-#### 3.2 Semantics 
-
-A `form` defines the **admissible type signatures** for a term during verification. It does not implement behavior - it restricts typing. 
-
-#### 3.3 Example 
-```lisp
-(form fcvt
-  ((args (named Type) (bv 32)) (ret (bv 32)))
-  ((args (named Type) (bv 32)) (ret (bv 64)))
-  ((args (named Type) (bv 64)) (ret (bv 32)))
-  ((args (named Type) (bv 64)) (ret (bv 64))))
-```
-
-**Explanation:**
-This declares that `fcvt` supports four types of combinations: 
-    - 32 -> 32 
-    - 32 -> 64
-    - 64 -> 32 
-    - 64 -> 64 
-
-The verifier checks that any use of `fcvt` conforms to one of these signatures. 
-
-#### 3.4 Signature Grammar and Parsing 
-
-##### 3.4.1 Formal Grammar 
-```bnf
-<signature>  ::= "(" <sig-args> <sig-ret> <sig-canon> ")"
-<sig-args>   ::= "(" "args" <model-ty>* ")"
-<sig-ret>    ::= "(" "ret" <model-ty>* ")"
-<sig-canon>  ::= "(" "canon" <model-ty>* ")"
-```
-
-##### 3.4.2 Semantic Meaning 
-
-A signature defines 
-- argument SMT sorts
-- return SMT sorts
-- optional canonical type 
-
-It represents a function type: 
-```code
-(args₁ × args₂ × …) → (ret₁ × ret₂ × …)
-```
-
-### 4. Instantiation: `(instantiate ...)`
-
-#### 4.1 Formal Grammar 
-
-```bnf
-<instantiation> ::= <ident> <signature>*
-                  | <ident> <ident>
-
-<signature>  ::= "(" <sig-args> <sig-ret> <sig-canon> ")"
-<sig-args>   ::= "(" "args" <model-ty>* ")"
-<sig-ret>    ::= "(" "ret" <model-ty>* ")"
-<sig-canon>  ::= "(" "canon" <model-ty>* ")"
-```
-
-#### 4.2 Semantics
-
-`instantiate` binds a term to: 
-- a named `form`, or 
-- explicit signatures 
-
-It produces concrete typed instances for verification.
-
-Each instance generates separate SMT obligations.
-
-#### 4.3 Example
-
-```lisp
-(spec (iadd ty x y)
-  (provide (= result (bvadd x y))))
-
-(instantiate iadd
-  ((args (named Type) (bv 8) (bv 8)) (ret (bv 8)))
-  ((args (named Type) (bv 16) (bv 16)) (ret (bv 16)))
-  ((args (named Type) (bv 32) (bv 32)) (ret (bv 32)))
-  ((args (named Type) (bv 64) (bv 64)) (ret (bv 64)))
-  ((args (named Type) (bv 128) (bv 128)) (ret (bv 128))))
-```
-
-**Explanation:**
-- The `spec` defines bitvector addition abstractly 
-- `instantiate` create concrete width-specific instances 
-- The verifier generates SMT obligations separately for each width 
 
 ### Summary 
 
