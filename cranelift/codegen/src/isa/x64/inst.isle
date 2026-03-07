@@ -1089,7 +1089,7 @@
 (type SyntheticAmode extern (enum))
 (model SyntheticAmode (type (bv 64)))
 
-(decl synthetic_amode_to_reg_mem (SyntheticAmode) RegMem)to_amode
+(decl synthetic_amode_to_reg_mem (SyntheticAmode) RegMem)
 (extern constructor synthetic_amode_to_reg_mem synthetic_amode_to_reg_mem)
 
 (decl amode_to_synthetic_amode (Amode) SyntheticAmode)
