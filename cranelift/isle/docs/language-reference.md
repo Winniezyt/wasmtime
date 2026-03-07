@@ -1603,3 +1603,581 @@ The grammar accepted by the parser is as follows:
 <sig-args>   ::= "(" "args" <model-ty>* ")"
 <sig-ret>    ::= "(" "ret" <model-ty>* ")"
 <sig-canon>  ::= "(" "canon" <model-ty>* ")"
+``` 
+
+
+## ISLE Verification Extensions — Structured Reference
+
+This section documents the verification-specific extensions to ISLE.
+These constructs extend ISLE with a logical contract layer and an SMT-backed semantic layer for formal reasoning.
+
+At the top level of a verification-enabled ISLE file, four new definition forms are supported:
+1. `(spec ...)` - attaches a logical contract to a term
+2. `(model ...)` - gives SMT meaning to ISLE types
+3. `(form ...)` - declares reusable verification type signatures
+4. `(instantiate ...)` - binds a term to concrete signatures
+
+There constructs are parsed in `parse_def()` in `parser.rs` file: 
+
+```rust 
+match self.expect_ident()?.as_str() {
+    "spec" => Def::Spec(self.parse_spec()?),
+    "model" => Def::Model(self.parse_model()?),
+    "form" => Def::Form(self.parse_form()?),
+    "instantiate" => Def::Instantiation(self.parse_instantiation()?),
+    ...
+}
+```
+Each keyword dispatches to a dedicated parser function.
+
+In addition, verification introduces a logical expression sublanguage used within specifications.
+
+### 1. Specification: `(spec ...)` 
+
+A `spec` defines a logical constract over an ISLE term. 
+
+#### 1.1. Formal Grammar 
+```bnf
+<spec> ::= "(" <ident> <ident>* ")" <provide> [ <require> ]
+
+<provide> ::= "(" "provide" <spec-expr>* ")"
+<require> ::= "(" "require" <spec-expr>* ")"
+<match>   ::= "(" "match" <spec-expr>* ")"
+<modifies> ::= "(" "modifies" <ident> [ <ident> ] ")"
+```
+
+#### 1.2 Semantics 
+A `spec` definition declares a **logical contract** for an ISLE term. 
+
+Given 
+```lisp
+(spec (f x₁ … xₙ)
+   (require R₁ … Rₖ)
+   (provide P₁ … Pₘ))
+```
+
+The verification meaning is
+```lisp 
+(R₁ ∧ … ∧ Rₖ) ⇒ (P₁ ∧ … ∧ Pₘ)
+```
+
+**Semantic Roles:**
+
+- The `<spec-head>` identifies the term and its formal parameters. 
+- A `(require ...)` clause encodes preconditions. 
+- A `(provide ...)` clause encodes postconditions. 
+- If `require` is omitted, it defaults to `true`. 
+- `(match ...)` supports pattern-related constraints 
+- `(modifies ...)` describes state mutation effects
+
+Semantically: 
+```lisp
+(require₁ ∧ … ∧ requireₙ) ⇒ (provide₁ ∧ … ∧ provideₖ)
+```
+#### 1.3 Parser Implementation 
+
+Top-level dispatch:
+
+```rust
+"spec" => Def::Spec(self.parse_spec()?),
+```
+
+Core parsing logic:
+```rust 
+fn parse_spec(&mut self) -> Result<Spec> {
+    let pos = self.pos();
+    self.expect_lparen()?; 
+    let term = self.parse_ident()?;
+    let mut args = vec![];
+    while !self.is_rparen() {
+        args.push(self.parse_ident()?);
+    }
+    self.expect_rparen()?;
+
+    let mut provides = Vec::new();
+    let mut requires = Vec::new();
+    let mut matches = Vec::new();
+    let mut modifies = Vec::new();
+
+    while self.is_lparen() {
+        self.expect_lparen()?;
+        match &self.expect_symbol()?[..] {
+            "provide" => {
+                while !self.is_rparen() {
+                    provides.push(self.parse_spec_expr()?);
+                }
+            }
+            "require" => {
+                while !self.is_rparen() {
+                    requires.push(self.parse_spec_expr()?);
+                }
+            }
+            "match" => {
+                while !self.is_rparen() {
+                    matches.push(self.parse_spec_expr()?);
+                }
+            }
+            "modifies" => {
+                let state = self.parse_ident()?;
+                let cond = if self.is_sym() {
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                modifies.push(Modifies { state, cond });
+            }
+            field => {
+                return Err(self.error(
+                    pos,
+                    format!("Invalid spec field {field}"),
+                ));
+            }
+        }
+        self.expect_rparen()?;
+    }
+
+    Ok(Spec {
+        term,
+        args,
+        provides,
+        requires,
+        matches,
+        modifies,
+        pos,
+    })
+}
+```
+
+**Structural Observation:**
+The parser: 
+- Extracts term + arguments 
+- Collects logical exprsesions into vectors
+- Builds a `Spec` AST node
+- Does not evaluate logic - only construct structure 
+
+Semantic interpretation occurs later during SMT lowering. 
+
+#### 1.4 Example
+
+```lisp
+(decl value_regs (Reg Reg) ValueRegs)
+
+(spec (value_regs arg1 arg2)
+  (provide
+    (= (:lo result) arg1)
+    (= (:hi result) arg2)))
+```
+
+**Explanation:**
+- `value_regs` is declared as a term 
+- The specification states that the resulting value has: 
+    - low half equal to `arg1`
+    - high half equal to `arg2`
+- There is no `require` block, so the contract is unconditional. 
+
+#### 1.5 Specific Expression Language (`spec-expr`)
+
+`spec-expr` is not a top-level feature, but the logical sublanguage used inside `require`, `provide`, and `match`. 
+
+##### 1.5.1 Formal Grammar 
+
+```bnf
+
+<spec-expr> ::= <int>
+              | <spec-bv>
+              | "true" | "false"
+              | <ident>
+              | "(" "switch" <spec-expr> <spec-pair>* ")"
+              | "(" <spec-op> <spec-expr>* ")"
+              | "(" <ident> ")"
+              | "(" ")"
+
+<spec-bv> ::= "#b" [ "+" | "-" ] ("0".."1")+
+            | "#x" [ "+" | "-" ] ("0".."9" | "A".."F" | "a".."f")+
+
+<spec-pair> ::= "(" <spec-expr> <spec-expr> ")"
+
+<spec-op> ::= "and" | "not" | "or" | "=>"
+            | "=" | "<=" | "<" | ">=" | ">"
+            | "bvnot" | "bvand" | "bvor" | "bvxor"
+            | "bvneg" | "bvadd" | "bvsub" | "bvmul"
+            | "bvudiv" | "bvurem" | "bvsdiv" | "bvsrem"
+            | "bvshl" | "bvlshr" | "bvashr"
+            | "bvsaddo" | "subs"
+            | "bvule" | "bvult" | "bvugt" | "bvuge"
+            | "bvsle" | "bvslt" | "bvsgt" | "bvsge"
+            | "rotr" | "rotl"
+            | "extract" | "concat" | "conv_to"
+            | "zero_ext" | "sign_ext"
+            | "int2bv" | "bv2int"
+            | "widthof"
+            | "if" | "switch"
+            | "popcnt" | "rev" | "cls" | "clz"
+            | "load_effect" | "store_effect"
+
+```
+
+##### 1.5.2 Operators (`spec-op`)
+Operators include: 
+- Boolean logic: `and`, `or`, `not`, `=>`
+- Equality & comparisons 
+- Bitvector arithmetic (`bvadd`, `bvmul`, etc.)
+- Bitwise ops (`bvand`, `bvor`, etc.)
+- Extraction/concatenation
+- Conversions (`int2bv`, `bv2int`)
+- Control (`if`, `switch`)
+- Effects (`load_effect`, `store_effect`)
+
+These directly maps to SMT operators. 
+
+##### 1.5.3 Semantics 
+`spec-expr` defines a first-order term language over: 
+- integers
+- bitvectors
+- booleans
+- state effects
+
+Every expression is lowered to an SMT term. 
+
+For example: 
+```lisp
+(= result (bvadd x y))
+```
+becomes an SMT equality constraint. 
+
+##### 1.5.4 Parser Implementation 
+
+```rust
+fn parse_spec_expr(&mut self) -> Result<SpecExpr> {
+    if let Some(i) = self.try_parse_int()? {
+        return Ok(SpecExpr::ConstInt(i));
+    }
+
+    if let Some(bv) = self.try_parse_bitvec()? {
+        return Ok(SpecExpr::ConstBitVec(bv));
+    }
+
+    if self.peek_ident("true") {
+        self.expect_ident()?;
+        return Ok(SpecExpr::ConstBool(true));
+    }
+
+    if self.peek_ident("false") {
+        self.expect_ident()?;
+        return Ok(SpecExpr::ConstBool(false));
+    }
+
+    if self.peek_ident() {
+        return Ok(SpecExpr::Var(self.expect_ident()?));
+    }
+
+    self.expect_lparen()?;
+    let op = self.expect_ident()?;
+    let mut args = vec![];
+    while !self.peek_rparen() {
+        args.push(self.parse_spec_expr()?);
+    }
+    self.expect_rparen()?;
+
+    Ok(SpecExpr::Op { op, args })
+}
+```
+
+The parser builds: 
+```rust
+SpecExpr::ConstInt
+SpecExpr::ConstBitVec
+SpecExpr::ConstBool
+SpecExpr::Var
+SpecExpr::Op { op, args }
+```
+
+This AST is later translated into SMT. 
+
+### 2. Model: `(model ...)`
+
+#### 2.1 Formal Grammar 
+
+```bnf
+<model> ::= <ty> "(" "type" <model-ty> ")"
+          | <ty> "(" "enum" <model-variant>* ")"
+
+<model-ty> ::= "Bool"
+             | "Int"
+             | "Unit"
+             | "(" "bv" [ <int> ] ")"
+
+<model-variant> ::= "(" <ident> [ <spec-expr> ] ")"
+```
+
+#### 2.2 Semantics
+
+A `model` definition assigns an **SMT interpretation** to an ISLE type. 
+
+This definds 
+```code
+ISLE Type  →  SMT Sort
+```
+
+Without a model a type has no formal meaning in verification. 
+
+This bridges ISLE's type system and the SMT solver. 
+
+#### 2.3 Parser Implementation 
+
+Top-level dispatch:
+```rust 
+"model" => Def::Model(self.parse_model()?),
+```
+
+Core parsing logic: 
+```rust
+fn parse_model(&mut self) -> Result<Model> {
+    let pos = self.pos();
+    let name = self.expect_ident()?;
+
+    self.expect_lparen()?;
+    let kind = self.expect_ident()?;
+
+    let val = match kind.as_str() {
+        "type" => {
+            let ty = self.parse_model_type()?;
+            ModelValue::TypeValue(ty)
+        }
+        "enum" => {
+            let mut variants = vec![];
+            while self.peek_lparen() {
+                variants.push(self.parse_model_variant()?);
+            }
+            ModelValue::EnumValue(variants)
+        }
+        _ => return self.error("unknown model kind"),
+    };
+
+    self.expect_rparen()?;
+    Ok(Model { name, val, pos })
+}
+```
+
+Supported SMT types: 
+```rust
+fn parse_model_type(&mut self) -> Result<ModelType> {
+    if self.peek_ident("Bool") {
+        self.expect_ident()?;
+        return Ok(ModelType::Bool);
+    }
+    if self.peek_ident("Int") {
+        self.expect_ident()?;
+        return Ok(ModelType::Int);
+    }
+    if self.peek_ident("Unit") {
+        self.expect_ident()?;
+        return Ok(ModelType::Unit);
+    }
+
+    self.expect_lparen()?;
+    let ty = match self.expect_ident()?.as_str() {
+        "bv" => {
+            let width = if !self.peek_rparen() {
+                Some(self.expect_int()?)
+            } else {
+                None
+            };
+            ModelType::BitVec(width)
+        }
+        _ => return self.error("unknown model type"),
+    };
+    self.expect_rparen()?;
+    Ok(ty)
+}
+```
+
+#### 2.4 Examples 
+
+```lisp
+(type WritableReg (primitive WritableReg))
+(model WritableReg (type (bv)))
+```
+
+**Explanation:**
+```code
+WritableReg ↦ BitVec[w]
+```
+- `WritableReg` is an ISLE type 
+- The model maps it to an SMT bitvector 
+- Since no width is provided, the bitvector width may be inferred later. 
+
+### 3. Form: `(form ...)`
+
+#### 3.1 Formal Grammar 
+
+```bnf
+<form> ::= <ident> <signature>*
+```
+
+#### 3.2 Semantics 
+
+A `form` defines the **admissible type signatures** for a term during verification. It does not implement behavior - it restricts typing. 
+
+#### 3.3 Parser Implementation 
+
+Top-level dispatch:
+```rust 
+"form" => Def::Form(self.parse_form()?),
+```
+
+Core parsing logic: 
+```rust
+fn parse_form(&mut self) -> Result<Form> {
+    let pos = self.pos();
+    let name = self.expect_ident()?;
+    let mut signatures = vec![];
+
+    while self.peek_lparen() {
+        signatures.push(self.parse_signature()?);
+    }
+
+    Ok(Form { name, signatures, pos })
+}
+```
+
+#### 3.4 Example 
+```lisp
+(form fcvt
+  ((args (named Type) (bv 32)) (ret (bv 32)))
+  ((args (named Type) (bv 32)) (ret (bv 64)))
+  ((args (named Type) (bv 64)) (ret (bv 32)))
+  ((args (named Type) (bv 64)) (ret (bv 64))))
+```
+
+**Explanation:**
+This declares that `fcvt` supports four types of combinations: 
+    - 32 -> 32 
+    - 32 -> 64
+    - 64 -> 32 
+    - 64 -> 64 
+
+The verifier checks that any use of `fcvt` conforms to one of these signatures. 
+
+#### 3.5 Signature Grammar and Parsing 
+
+##### 3.5.1 Formal Grammar 
+```bnf
+<signature>  ::= "(" <sig-args> <sig-ret> <sig-canon> ")"
+<sig-args>   ::= "(" "args" <model-ty>* ")"
+<sig-ret>    ::= "(" "ret" <model-ty>* ")"
+<sig-canon>  ::= "(" "canon" <model-ty>* ")"
+```
+
+##### 3.5.2 Semantic Meaning 
+
+A signature defines 
+- argument SMT sorts
+- return SMT sorts
+- optional canonical type 
+
+It represents a function type: 
+```code
+(args₁ × args₂ × …) → (ret₁ × ret₂ × …)
+```
+
+##### 3.5.3 Parser Structure (Conceptual) 
+
+`parse_signature():`
+1. Parse `(arg ...)`
+2. Parse `(ret ...)`
+3. Optionally parse `(canon ...)`
+4. Builds a `Signature` AST node
+
+Each component becomes a typed verification used during instantiation. 
+
+### 4. Instantiation: `(instantiate ...)`
+
+#### 4.1 Formal Grammar 
+
+```bnf
+<instantiation> ::= <ident> <signature>*
+                  | <ident> <ident>
+
+<signature>  ::= "(" <sig-args> <sig-ret> <sig-canon> ")"
+<sig-args>   ::= "(" "args" <model-ty>* ")"
+<sig-ret>    ::= "(" "ret" <model-ty>* ")"
+<sig-canon>  ::= "(" "canon" <model-ty>* ")"
+```
+
+#### 4.2 Semantics
+
+`instantiate` binds a term to: 
+- a named `form`, or 
+- explicit signatures 
+
+It produces concrete typed instances for verification.
+
+Each instance generates separate SMT obligations.
+
+#### 4.3 Parser Implementation 
+Top-level dispatch:
+```rust
+"instantiate" => Def::Instantiation(self.parse_instantiation()?),
+```
+
+Core parsing logic: 
+```rust
+fn parse_instantiation(&mut self) -> Result<Instantiation> {
+    let term = self.expect_ident()?;
+
+    if self.peek_ident() {
+        let form = self.expect_ident()?;
+        return Ok(Instantiation {
+            term,
+            form: Some(form),
+            signatures: vec![],
+        });
+    }
+
+    let mut signatures = vec![];
+    while self.peek_lparen() {
+        signatures.push(self.parse_signature()?);
+    }
+
+    Ok(Instantiation {
+        term,
+        form: None,
+        signatures,
+    })
+}
+```
+#### 4.4 Example
+
+```lisp
+(spec (iadd ty x y)
+  (provide (= result (bvadd x y))))
+
+(instantiate iadd
+  ((args (named Type) (bv 8) (bv 8)) (ret (bv 8)))
+  ((args (named Type) (bv 16) (bv 16)) (ret (bv 16)))
+  ((args (named Type) (bv 32) (bv 32)) (ret (bv 32)))
+  ((args (named Type) (bv 64) (bv 64)) (ret (bv 64)))
+  ((args (named Type) (bv 128) (bv 128)) (ret (bv 128))))
+```
+
+**Explanation:**
+- The `spec` defines bitvector addition abstractly 
+- `instantiate` create concrete width-specific instances 
+- The verifier generates SMT obligations separately for each width 
+
+### Summary 
+
+The ISLE verification subset introduces: 
+- Logical contracts (`spec`)
+- SMT type interpretation (`model`)
+- Signature declaration (`form`)
+- Concrete Instantiation (`instantiate`)
+
+Together these construct form a layered architecture: 
+1. **Type Modelling Layer** - via `model`
+2. **Signature Layer** - via `form`
+3. **Instantiation Layer** - via `instantiate`
+4. **Logical Contract Layer** - visa `spec`
+
+This design cleanly separates typing, instantiation, and logical reasoning within ISLE's verification framework. 
