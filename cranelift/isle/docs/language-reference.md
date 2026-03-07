@@ -1672,19 +1672,74 @@ This encodes the ISLE type as a finite SMT datatype.
 
 #### 1.3 Examples 
 
+**Example 1**: fixed bitvector width 
+
 ```lisp
-(type WritableReg (primitive WritableReg))
-(model WritableReg (type (bv)))
+(type UImm5 (primitive UImm5))
+(model UImm5 (type (bv 5)))
 ```
 
-**Explanation:**
-```code
-WritableReg ↦ BitVec[w]
-```
-- `WritableReg` is an ISLE type 
-- The model maps it to an SMT bitvector 
-- Since no width is provided, the bitvector width may be inferred later. 
+**Explanation**: This example models the ISLE type `UImm5` as a 5-bit SMT bitvector. 
+Such types are commonly used to represent small immediates in instruction encodings.  
+The `model` declaration ensures that the SMT solver interprets values of this type as bitvectors of width 5.
 
+**Example 2**: composite (struct) type
+
+```lisp
+(type Imm12 (primitive Imm12))
+(model Imm12
+  (type
+    (struct
+      (bits (bv 12))
+      (shift12 Bool)
+    )
+  )
+)
+```
+
+**Explanation**: This example models `Imm12` as a composite SMT structure.
+
+The model contains two fields:
+
+- `bits` — a 12-bit bitvector representing the immediate value
+- `shift12` — a Boolean flag indicating whether the value is shifted
+
+Composite models allow ISLE types to map to structured SMT datatypes rather than primitive values.
+
+**Example 3**: Enumeration Type
+
+```lisp
+(type BitOp
+  (enum
+    (RBit)
+    (Clz)
+    (Cls)
+    (Rev16)
+    (Rev32)
+    (Rev64)
+))
+```
+
+**Explanation**: Enumeration types are modeled as SMT datatypes with multiple variants.
+
+Each variant corresponds to a possible value of the ISLE type.  
+This allows the SMT solver to reason about which variant of the enum is active during verification.
+
+**Example 4**: Parametric enum (variants carry fields)
+```lisp
+(type CondBrKind extern
+  (enum
+    (Zero (r Reg))
+    (NotZero (r Reg))
+    (Cond (cc Cond))
+))
+```
+
+**Explanation**: Variants of an enum may also carry additional data.
+
+In this example, the `CondBrKind` type represents different conditional branch kinds.  
+Some variants carry additional information, such as a register or condition code.  
+These fields are modeled as part of the SMT datatype.
 
 ### 2. Instantiation: `(instantiate ...)`
 
@@ -1807,12 +1862,12 @@ The verifier checks that any use of `fcvt` conforms to one of these signatures.
   ((args (named Type) (bv 32) (bv 32)) (ret (bv 32)))
   ((args (named Type) (bv 64) (bv 64)) (ret (bv 64)))
   ((args (named Type) (bv 128) (bv 128)) (ret (bv 128))))
-```
+``
 
 **Explanation:**
-- The `spec` defines bitvector addition abstractly 
-- `instantiate` create concrete width-specific instances 
-- The verifier generates SMT obligations separately for each width 
+- The `spec` defines integer addition abstractly using bitvector addition 
+- `instantiate` block then provides concrete verification instances for 8, 16, 32, 64, 128 bit
+- Each instantiation generates a separate SMT verification obligation for that bit-width 
 
 ### 3. Specification: `(spec ...)` 
 
@@ -1963,6 +2018,6 @@ Together these construct form a layered architecture:
 1. **Type Modelling Layer** - via `model`
 2. **Signature Layer** - via `form`
 3. **Instantiation Layer** - via `instantiate`
-4. **Logical Contract Layer** - visa `spec`
+4. **Specification Layer** - visa `spec`
 
 This design cleanly separates typing, instantiation, and logical reasoning within ISLE's verification framework. 
